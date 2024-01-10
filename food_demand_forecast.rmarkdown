@@ -1,0 +1,818 @@
+---
+title: "food demand forecast"
+author: "Karani Keith"
+format: html
+editor: visual
+---
+
+
+#### Introduction
+
+A meal delivery company which operates in multiple cities. It have various fulfillment centers in these cities for dispatching meal orders to their customers. My goal is to help these centers with demand forecasting for upcoming weeks so that these centers will plan the stock of raw materials accordingly.
+
+### Objective
+
+The replenishment of majority of raw materials is done on weekly basis and since the raw material is perishable, the procurement planning is of utmost importance. To predict the demand for the next 10 weeks (Weeks: 146-155) for the center-meal combinations in the test set.
+
+Secondly, staffing of the centers is also one area wherein accurate demand forecasts are really helpful.
+
+#### load the libraries to use
+
+
+```{r}
+library(tidyverse)
+library(tsibble)
+```
+
+
+#### load the data sets to use
+
+
+```{r}
+fulfilment_center_info <- read_csv("data/fulfilment_center_info.xls")
+View(fulfilment_center_info)
+
+
+meal_info <- read_csv("data/meal_info.xls")
+View(meal_info)
+
+
+test <- read_csv("data/test.csv")
+View(test)
+
+
+
+train <- read_csv("data/train.csv")
+View(train)
+```
+
+
+#### Check for duplicates and NA values
+
+
+```{r}
+train %>% 
+  group_by(week, center_id, meal_id) %>% 
+  summarise(count=n()) %>% 
+  filter(count>1) #no dup
+
+train %>% 
+  group_by(week, center_id) %>% 
+  summarize(count=n()) %>% 
+  arrange(desc(count))
+
+train %>% 
+  group_by(center_id, meal_id) %>% 
+  summarize(count=n()) %>% 
+  arrange(desc(count)) # a lot of intermittent demand
+
+meal_info %>% 
+  summarise(count=n()) #total 51 meals, some centers dont offer every meal
+colSums(is.na(train)) #no NA
+train %>% 
+  arrange(num_orders) #no 0 order, 
+```
+
+
+#### group analysis
+
+
+```{r}
+full1 <- left_join(train, fulfilment_center_info, by="center_id")
+names(full1)
+
+full_df <- left_join(full1, meal_info, by="meal_id")
+
+names(full_df)
+
+ts <- full_df %>% 
+  mutate(cm_id=str_c(center_id, meal_id)) %>% 
+  as_tsibble(index =week, key=cm_id )
+
+names(ts)
+View(ts)
+
+```
+
+
+#### sales over time from the fulfillment centers
+
+
+```{r}
+library(crosstalk)
+library(plotly)
+
+gg <- ts %>% 
+  ggplot(aes(week, num_orders, col=cm_id, group=cm_id))+
+  geom_line(show.legend = FALSE)+
+  labs(title = "Individual ts")
+
+shared_ts <- SharedData$new(ts)
+
+filter <- bscols(
+  filter_select("ids", "Sales over time: Select a time series ID (remove with backspace key, navigate with arrow keys):", shared_ts, ~cm_id, multiple = TRUE),
+  ggplotly(gg, dynamicTicks = TRUE),
+  widths = c(12, 12)
+)
+
+bscols(filter)
+```
+
+
+##### findings
+
+1.  Most meals weekly orders counts are below 2500 indicating noises.
+2.  cm_id 43_2290 starts with an outlier
+3.  some meals have zero in the ts
+
+#### All aggregated sales
+
+
+```{r}
+library(ggthemes)
+?index_by
+
+foo <- ts %>% 
+  index_by(week) %>% 
+  summarise(sum_orders=sum(num_orders)) 
+
+gg <- foo %>% 
+  ggplot(aes(week, sum_orders)) +
+  geom_line(col="blue") +
+  geom_vline(xintercept = c(53, 105), alpha=0.3, linetype=2) +
+  labs(title = "All intergrated sales") +
+  theme_tufte()
+ggplotly(gg, dynamicTicks = TRUE)
+
+```
+
+
+##### Observations
+
+1.  Overall, the demand can be termed as stable with a little drop from week 109 suggesting the business is in its mature period.
+2.  Demand is generally stable with two high spikes i.e week 5 and week 48 and a dip in week 62.
+3.  I have added the grey dash lines every 52weeks since there might be some seasonality but not clear.
+
+#### Sales per region / city
+
+
+```{r}
+
+foo <- ts %>% 
+  index_by(week) %>% 
+  group_by(region_code) %>% 
+  summarise(sum_orders=sum(num_orders))
+
+pl <- foo %>% 
+  ggplot(aes(week, sum_orders)) +
+  geom_line(aes(col=region_code), show.legend = FALSE) +
+  geom_vline(xintercept = c(53, 105), linetype=2, alpha=0.3) +
+  theme_tufte() +
+  labs(title = "sales by region")
+ggplotly(pl, dynamicTicks = TRUE)
+
+ts[,-2] %>% 
+  group_by(region_code) %>% 
+  summarise(area=round(mean(op_area), 1)) %>% 
+  ggplot(aes(as.factor(region_code), area))+
+  geom_col(fill="blue", show.legend = FALSE)+
+  labs(title="region and op areas")+
+  geom_text(aes(label=area), nudge_y = 0.2)
+
+foo <- ts %>% 
+  index_by(week) %>% 
+  group_by(region_code, center_id) %>% 
+  summarise(sum_orders=sum(sum(num_orders)))
+
+p2 <- foo %>% 
+  filter(!is.na(region_code)) %>% 
+  ggplot(aes(week, sum_orders))+
+  geom_line(aes(col=center_id, group=center_id), show.legend = FALSE)+
+  geom_vline(xintercept = c(53, 105), linetype=2, alpha=0.3)+
+  facet_wrap(~region_code, ncol = 2, scales = "free_y")+
+  theme_tufte()+
+  labs(title="sales per region")
+ggplotly(p2, dynamicTicks = TRUE)
+
+```
+
+
+##### observations
+
+-   Regions can be separated into 4 groups:
+
+    G1-R56 has a clear higher demand than the rest regions with a weekly average orders at around 350k.
+
+    G2-R34/77 \~88k,
+
+    G3-85 \~60K and rest in G4
+
+-   Despite the high demand differences between the regions, the pattern is similar across the group for instance a surge in week 5, a dip in week 62 which also matches the global pattern.
+
+    This suggests that the demand surges apply to all regions and is not caused by a specific region.
+
+-   The different operation areas are not reflected directly in the demand pattern
+
+Regions in G4 group has only one distribution center each.
+
+
+```{r}
+foo <- ts %>%
+  index_by(week) %>% 
+  group_by(city_code) %>% 
+  summarise(sum_orders=sum(num_orders))
+
+gg <- foo %>% 
+  ggplot(aes(week, sum_orders))+
+  geom_line(aes(col=city_code), show.legend = FALSE)+
+  geom_vline(xintercept = c(53, 105), linetype=2, alpha=0.3)+
+  theme_tufte()+
+  labs(title="sales by city")
+ggplotly(gg, dynamicTicks = TRUE)
+
+```
+
+
+##### Findings
+
+-   City 590, 526, 638 has a higher demand than the rest
+
+-   The general pattern is similar to the regional pattern
+
+#### Sales per center type
+
+
+```{r}
+library(tidyverse)
+foo <- ts %>% 
+  index_by(week) %>% 
+  group_by(center_type) %>% 
+  summarise(sum_orders=sum(num_orders))
+
+gg <- foo %>% 
+  ggplot(aes(week, sum_orders, group=center_type, col=center_type))+
+  geom_line(show.legend = FALSE)+
+  geom_vline(xintercept = c(53, 105), linetype=2, alpha=0.3)+
+  theme_tufte()+
+  labs(title="sales per center type")
+ggplotly(gg, dynamicTicks = TRUE)
+
+```
+
+
+##### Findings
+
+-   Type A\>b\>c
+
+-   Patterns are similar across types
+
+    #### Sales per category
+
+
+```{r}
+foo <- ts %>% 
+  index_by(week) %>% 
+  group_by(category) %>% 
+  summarise(sum_orders=sum(num_orders))
+
+gg <- foo %>% 
+  ggplot(aes(week, sum_orders, group=category, col=category))+
+  geom_line(show.legend = FALSE)+
+  geom_vline(xintercept = c(53, 105), linetype=2, alpha=0.3)+
+  theme_tufte()+
+  labs(title="sales per category")
+ggplotly(gg, dynamicTicks = TRUE)
+
+
+
+```
+
+
+#### Sales per cuisine
+
+
+```{r}
+foo <- ts %>% 
+  index_by(week) %>% 
+  group_by(cuisine) %>% 
+  summarise(sum_orders=sum(num_orders))
+gg <- foo %>% 
+  ggplot(aes(week, sum_orders, group=cuisine, col=cuisine))+
+  geom_line(show.legend = FALSE)+
+  geom_vline(xintercept = c(53, 105), linetype=2, alpha=0.3)+
+  theme_tufte()+
+  labs(title="sales per cusine")
+ggplotly(gg, dynamicTicks = TRUE)
+
+```
+
+
+#### Cuisine per region
+
+
+```{r}
+
+foo <- ts %>% 
+  index_by(week) %>% 
+  group_by(region_code, cuisine) %>% 
+  summarise(sum_orders=sum(num_orders))
+gg <- foo %>% 
+  filter(!is.na(region_code)) %>% 
+  ggplot(aes(week, sum_orders, group=cuisine, col=cuisine))+
+  geom_line(show.legend = FALSE)+
+  geom_vline(xintercept = c(53, 105), linetype=2, alpha=0.3)+
+  theme_tufte()+
+  labs(title="cuisine per region")+
+  facet_grid(region_code~cuisine, scales = "free_y")
+ggplotly(gg, dynamicTicks = TRUE)
+
+```
+
+
+##### Observations
+
+1.  Region 93 has a two spike of Thai food in week 46/98(+52) showing a clear seasonality. It's the only region that Thai food surpluses Indian & Italian food suggesting there might be more Thai people dwelling in that region.
+2.  Overall we can see Italian \> Indian \> Thai = continental.
+
+
+```{r}
+foo <- ts %>% 
+  index_by(week) %>% 
+  group_by(region_code, category) %>% 
+  summarise(sum_orders=sum(num_orders))
+
+gg <- foo %>% 
+  filter(!is.na(region_code)) %>% 
+  ggplot(aes(week, sum_orders, group=category, col=category))+
+  geom_line()+
+  theme_tufte()+
+  labs(title="category per region")+
+  facet_grid(region_code~category)
+ggplotly(gg, dynamicTicks = TRUE)
+
+```
+
+
+##### Findings
+
+1.  Rice Beverage/bowls/ sandwich/ Pizza / Salad are driving the sales in all regions.
+2.  Seafood / starters / snacks comes in 2nd place.
+3.  Some regions don't offer extra soup.
+4.  Some regions have began the business in extra category
+5.  Its worth noting that the demand of beverages are quite different across the regions.
+
+#### Explanatory variables
+
+##### a) variable correlations
+
+
+```{r}
+
+library(data.table)
+
+# Calculate the correlation matrix
+correlation_matrix <- cor(train)
+cor_matrix <- melt(correlation_matrix)
+cor_matrix$value <- round(cor_matrix$value,4)
+
+# Plot the correlation matrix as a heatmap
+plt <- ggplot(data =cor_matrix, aes(Var2, Var1, fill = value)) +
+  geom_tile(show.legend = FALSE) +
+  geom_text(aes(label=value), size=2)+
+  scale_fill_gradient(low = "white", high = "blue") +
+  labs(title = "Correlation Coefficient", x = "", y = "") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+plt
+
+
+```
+
+
+##### b) homepage promotions
+
+
+```{r}
+library(ggthemes)
+library(plotly)
+
+
+h_pro <- ts %>% 
+  filter(!homepage_featured==0) %>% 
+  as.tibble() %>% 
+  group_by(cm_id) %>% 
+  summarise(sum_orders=sum(num_orders)) %>% 
+  select(-2)
+sample_id <- function(df, vector, region_code, cuisine){
+  df %>% 
+    filter(cm_id %in% vector, region_code==region_code, cuisine==cuisine) %>% 
+    head(1) %>% 
+    pull(cm_id)
+}
+
+a <- ts %>% 
+    filter(cm_id %in% h_pro$cm_id, region_code==56, cuisine=="Italian") %>% 
+    head(1) %>% 
+    pull(cm_id)
+b <- ts %>% 
+    filter(cm_id %in% h_pro$cm_id, region_code==34, cuisine=="Continental") %>% 
+    head(1) %>% 
+    pull(cm_id)
+c <- ts %>% 
+    filter(cm_id %in% h_pro$cm_id, region_code==85, cuisine=="Indian") %>% 
+    head(1) %>% 
+    pull(cm_id)
+d <- ts %>% 
+    filter(cm_id %in% h_pro$cm_id, region_code==93, cuisine=="Thai") %>% 
+    head(1) %>% 
+    pull(cm_id)
+sample <- tibble(sample=c(a,b,c,d))
+p1 <- ts %>% 
+  filter(cm_id %in% sample$sample, !is.na(cuisine)) %>% 
+  mutate(has_hpro=if_else(homepage_featured==1, num_orders, NA_real_)) %>% 
+  ggplot(aes(week, num_orders, group=cm_id))+
+  geom_line(aes(col=cuisine), na.rm=TRUE)+
+  geom_point(aes(week, has_hpro), na.rm = TRUE)+
+  facet_wrap(~cm_id, ncol=1, scales = "free_y")+
+  labs(title="Sales for 3 random meals with homepage promotion", 
+       col="Cuisine")+
+  theme_tufte()
+ggplotly(p1, dynamicTicks = TRUE)
+
+
+
+```
+
+
+##### Findings
+
+1.  For Italian and Indian cuisine, the homepage promotions bring a peak in the week, with demand dropping in the following week
+2.  For continental cuisine, we see the promotion last the first 120 weeks, bringing some ups and downs in demand, suggesting the company is promoting the sales of this category. we also see the demand dropped after the promotion.
+3.  For Thai food, promotions generally increased the demand, which, however, dropped immediately afterwards
+
+##### c) emailer for promotion
+
+
+```{r}
+
+e_pro <- ts %>% 
+  filter(!emailer_for_promotion==0) %>% 
+  as.tibble() %>% 
+  mutate(id=str_c(cm_id, region_code, sep="_")) %>% 
+  group_by(id) %>% 
+  summarise(sum_orders=sum(num_orders)) %>% 
+  select(-2)
+
+foo <- ts %>% 
+  mutate(id=str_c(cm_id, region_code, sep="_"))
+a <- foo %>% 
+    filter(id %in% e_pro$id, region_code==56, cuisine=="Italian") %>% 
+    head(1) %>% 
+    pull(id)
+b <- foo %>% 
+    filter(id %in% e_pro$id, region_code==34, cuisine=="Continental") %>% 
+    head(1) %>% 
+    pull(id)
+c <- foo %>% 
+    filter(id %in% e_pro$id, region_code==85, cuisine=="Indian") %>% 
+    head(1) %>% 
+    pull(id)
+d <- foo %>% 
+    filter(id %in% e_pro$id, region_code==93, cuisine=="Thai") %>% 
+    head(1) %>% 
+    pull(id)
+sample <- tibble(sample=c(a,b,c,d))
+
+p1 <- foo %>% 
+  filter(id %in% sample$sample, !is.na(cuisine)) %>% 
+  mutate(has_epro=if_else(emailer_for_promotion==1, num_orders, NA_real_)) %>% 
+  ggplot(aes(week, num_orders, group=id))+
+  geom_line(aes(col=cuisine), na.rm=TRUE)+
+  geom_point(aes(week, has_epro), na.rm = TRUE)+
+  facet_wrap(~id, ncol=1, scales = "free_y")+
+  labs(title="Sales for 3 random meals with email promotion", 
+       col="Cuisine")+
+  theme_tufte()
+ggplotly(p1, dynamicTicks = TRUE)
+```
+
+
+##### observations
+
+1.  For Indian/Italian cuisines, we see similar patterns as the homepage promotion, demand reaching the top in the week and reducing in following week.
+2.  For Continental cuisine, we see a lagged 3 to lagged 4 effect.
+3.  For Thai food, promotions generally increased the demand, which, however, dropped immediately afterwards.
+
+##### d) price effect
+
+
+```{r}
+library(ggridges)
+
+foo <- ts %>% 
+  mutate(year=if_else(week<=52, 1, if_else(week<=104, 2, 3)))
+
+gg <- foo %>% 
+  filter(!is.na(region_code), num_orders!=0) %>% 
+  ggplot(aes(checkout_price, as.factor(year)))+
+  geom_density_ridges(bw=0.5, alpha=0.5)+
+  scale_x_continuous(trans = "log10", breaks = c(100, 300, 500, 800, 1000))+
+  coord_cartesian(xlim = c(90, 1000))+
+  facet_wrap(~cuisine)+
+  labs(title="Price change with time", x="Price", y="Year")+
+  theme_hc()
+gg
+
+
+```
+
+
+##### observations
+
+1.  The price is clearly increasing with time for all cuisines(the wave pattern moving towards the right side).
+2.  The continental and Indian food are priced higher than Italian and Thai food
+3.  Continental and Thai food share the similar change pattern that the last peaks become bi modal overtime. For continental food, the peak at 700 is gaining importance until it reaches the peak at 600. Similarly, for Thai food, 400 group is becoming as important as the 300 group.
+
+#### EDA observations
+
+-   There are 8 regions, 51 citys and 77 fulfillment centers
+
+-   ome region has only one center(23, 35, 71, 93), the rest has multiple.
+
+-   The demand pattern is pretty similar in regards to Italian/Indian cuisine but quite different about Thai.
+
+-   The aggregated demand is stable with a bit decreasing trend while the overall price is slightly increasing. It suggests the price might correlate to the demand in a negative way.
+
+-   The homepage/email promotions affect different materials in a different way. The promotion frequencies are also different.
+
+-   Region 35/85/93 doesn't offer soup/extras. Region 71 doesn't offer soup but just started the extra business.
+
+-   Most regions prefers Italian\>Indian\>Continental\>Thai while region 93 shows some unique preference wards Thai whose demand is highest in 4 regions.
+
+-   There are some unusual surges and drops in demands
+
+-   Beverage/rice bowls/sandwiches are top 3 categories
+
+### Modeling
+
+Given the above factors, the following models are considered
+
+1.  Dynamic regression model(DR) to correlate price change and promotion
+
+2.  Decomposition model(STL) to take care of the unusual dips(w62) and surges.
+
+3.  NAIVE model as the benchmark model.
+
+##### total aggregated Model building
+
+1.  weekly data: STL+non_seasonal approach to season adjust
+2.  Dynamic harmonic regression cant be used
+
+
+```{r}
+library(fable)
+library(feasts)
+library(urca)
+library(patchwork)
+library(gridExtra)
+
+foo <- ts
+full_ts <- foo %>% 
+  as.tibble() %>% 
+  group_by(cm_id) %>% 
+  summarise(count=n()) %>% 
+  filter(count==145) %>% 
+  select(1)
+
+part_ts <- foo %>% 
+  as.tibble() %>% 
+  group_by(cm_id) %>% 
+  summarise(count=n()) %>% 
+  filter(count!=145) %>% 
+  select(1)
+
+foo1 <- foo %>% 
+  filter(cm_id %in% full_ts$cm_id)
+fit <- foo1 %>% 
+  model(stl=decomposition_model(STL(num_orders, robust=TRUE),
+                                ETS(season_adjust~season("N"))),
+        arima=ARIMA(log(num_orders)))
+
+p1 <- fit %>% 
+  select(stl) %>% 
+  augment() %>% 
+  ggplot(aes(week, num_orders))+
+  geom_line()+
+  geom_line(aes(y=.fitted), col="blue")
+
+p2 <- fit %>% 
+  select(arima) %>% 
+  augment() %>% 
+  ggplot(aes(week, num_orders))+
+  geom_line()+
+  geom_line(aes(y=.fitted), col="red")
+
+p1
+any(is.na(p1))
+head(p1)
+
+p2
+any(is.na(p2))
+head(p2)
+
+p1/p2
+```
+
+
+##### Individual forecast plot
+
+
+```{r}
+library(gridExtra)
+
+ts <- ts %>% 
+  fill_gaps(emailer_for_promotion=0, homepage_featured=0, num_orders=0,
+            .full=TRUE) %>% 
+  group_by(cm_id) %>%
+  fill(c(3:6, 10:15), .direction = "downup")
+
+# data frame created for model fitiing
+full_ts <- foo %>% 
+  as.tibble() %>% 
+  group_by(cm_id) %>% 
+  summarise(count=n()) %>% 
+  filter(count==145) %>% 
+  select(1)
+part_ts <- foo %>% 
+  as.tibble() %>% 
+  group_by(cm_id) %>% 
+  summarise(count=n()) %>% 
+  filter(count!=145, count!=1) %>% 
+  select(1)
+
+single_ts <- foo %>% 
+  as.tibble() %>% 
+  group_by(cm_id) %>% 
+  summarise(count=n()) %>% 
+  filter(count==1) %>% 
+  select(1)
+
+# fit the model using ARIMA
+fit <- ts %>% 
+  filter(cm_id %in% full_ts$cm_id) %>% 
+  model(dr=ARIMA(num_orders~checkout_price))
+
+fit2 <- ts %>% 
+  filter(cm_id %in% part_ts$cm_id) %>% 
+  model(itmt=CROSTON(num_orders))
+# 
+full3 <- left_join(test, fulfilment_center_info, by="center_id")
+full_df3 <- left_join(full3, meal_info, by="meal_id")
+
+test <- full_df3 %>% 
+  mutate(cm_id=str_c(center_id, meal_id)) %>% 
+  as_tsibble(index =week, key=cm_id ) %>% 
+  fill_gaps(emailer_for_promotion=0, homepage_featured=0, .full=TRUE) %>% 
+  group_by(cm_id) %>%
+  fill(c(3:6, 9:14), .direction = "downup")
+test_full <- test %>% 
+  filter(cm_id %in% full_ts$cm_id)
+test_part <- test %>% 
+  filter(cm_id %in% part_ts$cm_id)
+
+# forecasing using the fitted models
+fc <- forecast(fit, test_full)
+fc2 <- forecast(fit2, test_part)
+fc <- bind_rows(fc, fc2)
+
+#visualiaze the focast
+p1 <- ts %>% 
+  filter(cm_id=="101062") %>% 
+  ggplot(aes(week, num_orders))+
+  geom_line()+
+  geom_line(data=fc[fc$cm_id=="101062", ], aes(week, .mean), col="blue")+
+  labs(title="meal 1062 by center", size=1)+
+  theme_classic()
+  
+meal_1062_590 <- ts %>% 
+  filter(meal_id=="1062", city_code=="590") %>% 
+  group_by(meal_id) %>% 
+  summarise(sum_orders=sum(num_orders))
+
+meal_fc_1062_590 <- fc %>% 
+  as_tsibble() %>% 
+  filter(meal_id=="1062", city_code=="590") %>% 
+  summarise(sum_orders=sum(.mean))
+
+p2 <- meal_1062_590 %>% 
+  ggplot(aes(week, sum_orders)) +
+  geom_line(size=0.5) +
+  geom_line(data=meal_fc_1062_590, aes(week, sum_orders), col="red",size=1)+
+  labs(title="meal 1062 by city")+
+  theme_classic()
+
+meal_1062_56 <- ts %>% 
+  filter(meal_id=="1062", region_code=="56") %>% 
+  group_by(meal_id) %>% 
+  summarise(sum_orders=sum(num_orders))
+
+meal_fc_1062_56 <- fc %>% 
+  as_tsibble() %>% 
+  filter(meal_id=="1062", region_code=="56") %>% 
+  summarise(sum_orders=sum(.mean))
+
+p3 <- meal_1062_56 %>% 
+  ggplot(aes(week, sum_orders)) +
+  geom_line(size=0.5) +
+  geom_line(data=meal_fc_1062_56, aes(week, sum_orders), col="green",size=1)+
+  labs(title="meal 1062 by region")+
+  theme_classic()
+
+
+p1
+any(is.na(p1))
+head(p1)
+
+
+p2
+any(is.na(p2))
+head(p2)
+
+p3
+any(is.na(p3))
+head(p3)
+
+p1/p2/p3
+```
+
+
+##### Aggregated forecast plot
+
+
+```{r}
+
+agg <- ts %>% 
+  aggregate_key(cuisine*category*meal_id*(region_code/city_code/center_id), sum_orders=sum(num_orders)) %>% 
+  index_by(week)
+
+agg_fc <- fc %>% 
+  as_tsibble(index=week, key=cm_id) %>% 
+  select(-c(2,4)) %>% 
+  rename(num_orders=.mean) %>% 
+  aggregate_key(cuisine*category*meal_id*(region_code/city_code/center_id), sum_orders=sum(num_orders))
+
+all_agg <- agg %>% 
+  filter(is_aggregated(meal_id), is_aggregated(cuisine), is_aggregated(category),
+         is_aggregated(region_code))
+
+all_fc_agg <- agg_fc %>% 
+  filter(is_aggregated(meal_id), is_aggregated(cuisine), is_aggregated(category),
+         is_aggregated(region_code))
+
+p1 <- all_agg %>% 
+  ggplot(aes(week, sum_orders))+
+  geom_line()+
+  geom_line(data=all_fc_agg, aes(week, sum_orders), size=1, col="blue")+
+  labs(title = "All aggregated orders")+
+  theme_bw()+
+  theme(plot.title = element_text(size = 16))
+cuisine_agg <- agg %>% 
+  filter(is_aggregated(meal_id), !is_aggregated(cuisine), is_aggregated(category),
+         is_aggregated(region_code))
+cuisine_fc_agg <- agg_fc %>% 
+  filter(is_aggregated(meal_id), !is_aggregated(cuisine), is_aggregated(category),
+         is_aggregated(region_code))
+cuisine_agg$cuisine <- format(cuisine_agg$cuisine)
+cuisine_fc_agg$cuisine <- format(cuisine_fc_agg$cuisine)
+
+p2 <- cuisine_agg %>% 
+  ggplot(aes(week, sum_orders))+
+  geom_line(aes(group=cuisine, col=cuisine), show.legend = TRUE)+
+  geom_line(data=cuisine_fc_agg, aes(week, sum_orders, group=cuisine), size=1, col="blue", show.legend = TRUE)+
+  facet_wrap(~cuisine, scales = "free_y")+
+  labs(title = "Orders by cuisine")+
+  coord_cartesian(xlim = c(100, 155))+
+  theme_bw()+
+  theme(plot.title = element_text(size = 16))
+category_agg <- agg %>% 
+  filter(is_aggregated(meal_id), is_aggregated(cuisine), !is_aggregated(category),
+         is_aggregated(region_code))
+category_fc_agg <- agg_fc %>% 
+  filter(is_aggregated(meal_id), is_aggregated(cuisine), !is_aggregated(category),
+         is_aggregated(region_code))
+category_agg$category <- format(category_agg$category)
+category_fc_agg$category <- format(category_fc_agg$category)
+
+p3 <- category_agg %>% 
+  ggplot(aes(week, sum_orders))+
+  geom_line(aes(group=category, col=category), show.legend = FALSE)+
+  geom_line(data=category_fc_agg, aes(week, sum_orders, group=category), size=1, col="blue", show.legend = FALSE)+
+  facet_wrap(~category, scales = "free_y")+
+  labs(title = "Orders by category")+
+  coord_cartesian(xlim = c(100, 155))+
+  theme_bw()
+  theme(plot.title = element_text(size = 16))
+
+
+```
+
